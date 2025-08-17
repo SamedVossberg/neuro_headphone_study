@@ -1,5 +1,5 @@
 numpy
-pandas==1.5.3
+pandas 
 matplotlib
 plotly.express
 neurokit2
