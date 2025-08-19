@@ -173,3 +173,35 @@ def plot_PSD_two_conditions(eeg_df, chans, condition1, condition2,
     fig = px.line(psd_df.melt(id_vars='Frequency', var_name='Condition', value_name='Power'),
                   x='Frequency', y='Power', color='Condition', color_discrete_map=color_map)
     fig.show()
+
+
+def plot_assr_snr_over_time(snr_df, *, snr_db_thresh=3.0, title="ASSR SNR over time"):
+    fig = px.line(snr_df, x="t_start", y="snr_db", markers=True, title=f"{title} (threshold = {snr_db_thresh} dB)")
+    fig.add_hline(y=snr_db_thresh, line_dash="dot")
+    fig.update_layout(xaxis_title="Time (s)", yaxis_title="SNR (dB)")
+    return fig
+
+def plot_psd_bar_for_window(x, *, fs=250.0, t_start=0.0, win_sec=5.0,
+                            max_freq=100.0, bin_width=1.0, f0=40.0,
+                            min_frequency=7.5):
+    # Extract window
+    x = np.asarray(x)
+    seg = x[int(t_start*fs): int((t_start+win_sec)*fs)]
+    if seg.size < 2:
+        raise ValueError("Selected window is too short.")
+    # Compute PSD and bin
+    psd = nk.signal_psd(seg, sampling_rate=fs, min_frequency=min_frequency, max_frequency=float(max_freq),
+                        normalize=False, window=1)
+    psd = psd[(psd["Frequency"] >= min_frequency) & (psd["Frequency"] <= max_freq)].copy()
+
+    edges = np.arange(min_frequency, max_freq + bin_width, bin_width)
+    psd["bin"] = pd.cut(psd["Frequency"], bins=edges, right=False, include_lowest=True)
+    binned = psd.groupby("bin", as_index=False)["Power"].mean()
+    binned["Hz_mid"] = binned["bin"].apply(lambda iv: (iv.left + iv.right) / 2)
+
+    title = f"PSD (bar) for window {t_start:.1f}-{t_start+win_sec:.1f}s"
+    fig = px.bar(binned, x="Hz_mid", y="Power",
+                 labels={"Hz_mid": "Frequency (Hz)", "Power": "Power"}, title=title)
+    fig.add_vline(x=float(f0), line_dash="dot")
+    fig.update_layout(xaxis=dict(range=[min_frequency, max_freq]))
+    return fig

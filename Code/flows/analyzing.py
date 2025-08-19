@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import mne
+import neurokit2 as nk
 from scipy.integrate import simps
 from mne.time_frequency import psd_array_welch
 
@@ -103,7 +104,7 @@ def get_channel_band_power(eeg_signal_series, fs):
     band_powers_df = pd.DataFrame([band_powers])
     return band_powers_df
 
-def assr_snr(signal, min_freq, max_freq, fs, normalize, window_sec, overlap_pct, verbose="WARNING"):
+def assr_snr(signal, min_freq, max_freq, fs, normalize, window_sec, verbose="WARNING"):
     '''
         Mikkelsen2015: Using the ASSR paradigm, we then estimated the signal-to-
         noise ratios (SNR) for both scalp and ear-EEG setups, whereby
@@ -116,15 +117,15 @@ def assr_snr(signal, min_freq, max_freq, fs, normalize, window_sec, overlap_pct,
     signal = signal.copy()
 
     # Calculate PSD
-    psd = compute_robust_psd(signal, min_freq, max_freq, fs, normalize, window_sec, overlap_pct, verbose=verbose)
+    psd = nk.signal_psd(signal, sampling_rate=fs, min_frequency=min_freq, max_frequency=max_freq, normalize=normalize, window=window_sec)
 
     # Power values in µV²/Hz → convert to dB
     # TODO: Would have to do that before though (above when the psd is extracted)
     # psd['Power'] = 10 * np.log10(psd['Power'])
 
-    noise_below = psd.query("34.5 <= Frequency < 39.5")['Power'].mean()
-    signal_power = psd.query("39.5 <= Frequency <= 40.5")['Power'].mean()
-    noise_above = psd.query("40.5 < Frequency <= 45.5")['Power'].mean()
+    noise_below = psd.query("36 <= Frequency <= 40.5").Power.mean()
+    signal_power = psd.query("40.5 < Frequency < 41.5").Power.mean()
+    noise_above = psd.query("41.5 <= Frequency <= 46").Power.mean()
 
     snr = signal_power - np.mean([noise_below, noise_above])
     return snr
@@ -167,3 +168,64 @@ def extract_IAF(raw, show_psd=None):
     from philistine.mne import savgol_iaf
     iaf = savgol_iaf(raw, picks=None, fmin=6, fmax=14, ax=show_psd)  # ax specifies whether a plot should show up
     return iaf.CenterOfGravity
+
+def scan_assr_windows(x, *, fs=250.0, win_sec=5.0, step_sec=1.0, **snr_kwargs):
+    """Slide a window over the signal and compute SNR(dB) per window.
+    Returns a DataFrame with columns: t_start, t_end, snr_db
+    """
+    x = np.asarray(x)
+    w = int(round(win_sec * fs))
+    s = int(round(step_sec * fs))
+    rows = []
+    for start in range(0, max(1, len(x) - w + 1), s):
+        seg = x[start:start + w]
+        snr_db = assr_snr_db(seg, fs=fs, **snr_kwargs)
+        rows.append({"t_start": start / fs, "t_end": (start + w) / fs, "snr_db": snr_db})
+    return pd.DataFrame(rows)
+
+def assr_snr_db(segment, *, fs=250.0, f0=40.0, half_width=0.5, flank=4.0,
+                min_f=1.0, max_f=100.0):
+    """Compute ASSR SNR (dB) for a single window around f0.
+    signal band = [f0 - half_width, f0 + half_width]
+    noise  band = union of [f0 - flank, f0 - half_width) and (f0 + half_width, f0 + flank]
+    """
+    seg = np.asarray(segment)
+    if seg.size < 2:
+        return np.nan
+
+    psd = nk.signal_psd(seg, sampling_rate=fs, min_frequency=min_f,max_frequency=max_f, normalize=False, window=1)
+
+    sig = psd.loc[psd["Frequency"].between(f0 - half_width, f0 + half_width, inclusive="both"), "Power"].mean()
+    lo  = psd.loc[psd["Frequency"].between(f0 - flank,     f0 - half_width, inclusive="left"), "Power"].mean()
+    hi  = psd.loc[psd["Frequency"].between(f0 + half_width, f0 + flank,     inclusive="right"), "Power"].mean()
+    noise = np.nanmean([lo, hi])
+    if not np.isfinite(sig) or not np.isfinite(noise) or noise <= 0:
+        return np.nan
+    return float(10 * np.log10(sig / noise))
+
+def to_db(psd_df, power_col='Power'):
+    """Return a copy where 'Power' is converted to dB (10*log10)."""
+    df = psd_df.copy()
+    # Protect against log of zero
+    p = np.maximum(df[power_col].to_numpy(dtype=float), 1e-12)
+    df['Power'] = 10.0 * np.log10(p)
+    return df[['Frequency', 'Power']]
+
+def band_area(psd_df, lo, hi, power_col='Power'):
+    """Integrate power in [lo, hi] using trapezoid rule."""
+    f = psd_df['Frequency'].to_numpy(dtype=float)
+    P = psd_df[power_col].to_numpy(dtype=float)
+    m = (f >= lo) & (f <= hi)
+    if m.sum() < 2:
+        return np.nan
+    return float(np.trapz(P[m], f[m]))
+
+def rel_band_power(psd_df, lo, hi, power_col='Power'):
+    """Relative band power = area(lo..hi) / area(total)."""
+    f = psd_df['Frequency'].to_numpy(dtype=float)
+    P = psd_df[power_col].to_numpy(dtype=float)
+    if len(f) < 2:
+        return np.nan
+    band = band_area(psd_df, lo, hi, power_col=power_col)
+    total = float(np.trapz(P, f))
+    return (band / total) if total > 0 else np.nan

@@ -1,11 +1,13 @@
 import pandas as pd
 import numpy as np
+import re
 from mne.filter import filter_data
 from mne.channels import read_custom_montage
 from mne import create_info
 from mne.io import RawArray
 from neurokit2 import signal_filter
 import importlib.resources
+import warnings
 
 # Pre-process the data
 def initial_detrending(eeg, fs, low_freq = 1, method="mne"):
