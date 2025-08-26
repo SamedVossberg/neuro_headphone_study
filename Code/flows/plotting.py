@@ -205,3 +205,41 @@ def plot_psd_bar_for_window(x, *, fs=250.0, t_start=0.0, win_sec=5.0,
     fig.add_vline(x=float(f0), line_dash="dot")
     fig.update_layout(xaxis=dict(range=[min_frequency, max_freq]))
     return fig
+
+def plot_avg_psds_by_config_px(ear_only, top_ears, *,
+                               x_range=(0, 30), y_label="Power",
+                               title="Average PSDs: EC vs EO per configuration",
+                               show=True):
+    # Build a tidy DataFrame with 4 lines: EarOnly-EC/EO, Top+Ears-EC/EO
+    df = pd.concat([
+        pd.DataFrame({"Frequency": ear_only["EC"]["Frequency"], "Power": ear_only["EC"]["Power"], "State": "EC", "Config": "Ear Only"}),
+        pd.DataFrame({"Frequency": ear_only["EO"]["Frequency"], "Power": ear_only["EO"]["Power"], "State": "EO", "Config": "Ear Only"}),
+        pd.DataFrame({"Frequency": top_ears["EC"]["Frequency"], "Power": top_ears["EC"]["Power"], "State": "EC", "Config": "Top+Ears"}),
+        pd.DataFrame({"Frequency": top_ears["EO"]["Frequency"], "Power": top_ears["EO"]["Power"], "State": "EO", "Config": "Top+Ears"}),
+    ], ignore_index=True)
+
+    fig = px.line(df, x="Frequency", y="Power", color="Config", line_dash="State",
+                  labels={"Frequency": "Frequency (Hz)", "Power": y_label},
+                  title=title)
+    fig.update_xaxes(range=list(x_range))
+    fig.update_yaxes(showgrid=True)
+    if show: 
+        fig.show()
+        return None
+    return fig
+
+
+def plot_effect_bars_px(values_by_config: dict, *,
+                        y_label: str, title: str, text_fmt="{:.3f}", show=True):
+    # values_by_config e.g. {"Ear Only": 0.12, "Top+Ears": 0.08}
+    df = pd.DataFrame({"Config": list(values_by_config.keys()),
+                       "Value": list(values_by_config.values())})
+    df["Text"] = [text_fmt.format(v) for v in df["Value"]]
+    fig = px.bar(df, x="Config", y="Value", text="Text",
+                 labels={"Value": y_label}, title=title)
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_yaxes(showgrid=True)
+    if show: 
+        fig.show()
+        return None
+    return fig

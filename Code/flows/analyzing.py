@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import mne
 import neurokit2 as nk
+import warnings
 from scipy.integrate import simps
 from mne.time_frequency import psd_array_welch
 
@@ -229,3 +230,140 @@ def rel_band_power(psd_df, lo, hi, power_col='Power'):
     band = band_area(psd_df, lo, hi, power_col=power_col)
     total = float(np.trapz(P, f))
     return (band / total) if total > 0 else np.nan
+
+
+
+def _extract_run_number(run_value):
+    """Return integer run number from strings like 'rec1' or numerics like 1."""
+    s = str(run_value).strip().lower()
+    digits = re.sub(r"[^0-7]", "", s)
+    return int(digits) if digits else None
+
+def compute_session_avg_psd(active_recording, cond_ec_tag, cond_eo_tag):
+    """
+    For a single session row from `sessions`, load EEG, label EC/EO segments, compute robust PSD per channel,
+    and return two DataFrames (EC and EO) with columns ['Frequency','Power'] averaged across channels.
+    """
+
+    eeg, snr_df, load_report = process_recording(active_recording)
+    fs = float(load_report.get('estimated_fs', 250.0))
+
+    # Select signals for each condition
+    ec_df = eeg[eeg['Condition'].astype(str).str.contains(cond_ec_tag, case=False, regex=False)]
+    eo_df = eeg[eeg['Condition'].astype(str).str.contains(cond_eo_tag, case=False, regex=False)]
+
+    if ec_df.empty or eo_df.empty:
+        raise ValueError(f"Missing EC/EO segments for tags '{cond_ec_tag}'/'{cond_eo_tag}' in recording {active_recording.ID} ({active_recording.Run}).")
+
+    # Average PSD across channels for each condition -> Same building average of delta or delta after average? -> jup
+
+    desired = chans_ear_only if active_recording.Config == "Ear Only" else chans_top_ear
+    use_chans = [c for c in desired if c in eeg.columns]
+    if not use_chans:
+        raise ValueError(
+            f"No desired channels found in EEG for {active_recording.ID} ({active_recording.Run}). "
+            f"Desired={desired}, available={[c for c in eeg.columns if c.startswith('A')]}"
+        )
+
+    def _avg_psd_over_channels(signals_df):
+        psd_list = []
+        for ch in use_chans:
+            series = signals_df[ch]
+            psd_df = flows.compute_robust_psd(series, min_freq=min_freq, max_freq=max_freq, fs=fs,
+                                              normalize=True, window_sec=1, overlap_pct=0, verbose='WARNING')
+            psd_df = psd_df.rename(columns={'Power': f'P_{ch}'})
+            psd_list.append(psd_df)
+        # merge on frequency
+        merged = psd_list[0]
+        for nxt in psd_list[1:]:
+            merged = merged.merge(nxt, on='Frequency', how='inner')
+        merged['Power'] = merged.filter(like='P_').mean(axis=1)
+        return merged[['Frequency','Power']]
+
+    ec_psd = _avg_psd_over_channels(ec_df)
+    eo_psd = _avg_psd_over_channels(eo_df)
+
+    return ec_psd, eo_psd, fs
+
+def average_psds_across_sessions(df_sessions, config_label, verbose=True): # TODO: Should we exclude dead or too noisy chans/sessions?
+    """
+    Compute the average EC and EO PSD across all first sessions for a given configuration.
+    Returns a dict with keys: 'EC', 'EO', 'alpha_effect', 'n_used', 'fs_median'.
+    The alpha_effect is the integrated alpha-band (8-13 Hz) difference EC minus EO (Berger effect magnitude).
+    """
+    # Filter sessions
+    sel = df_sessions.copy()
+    sel = sel[sel['Config'].astype(str) == config_label]
+
+    # First-session filter: accept 'rec1' or numeric 1
+    run_mask = sel['Run'].astype(str).str.lower().str.contains("rec1") | (sel['Run'].astype(str).str.replace(r"[^0-7]","", regex=True) == "1")
+    sel = sel[run_mask]
+
+    if sel.empty:
+        raise ValueError(f"No sessions found for config '{config_label}' and Run == 1.")
+
+    ec_psds = []
+    eo_psds = []
+    fs_list = []
+
+    for row in sel.itertuples(index=False):
+        try:
+            run_num = _extract_run_number(getattr(row, "Run"))
+            cond_ec = f"headphones_setup_ec_{run_num}" if run_num is not None else "headphones_setup_ec_1" # careful with "ec" or only "eo" -> "rec" === True with "ec"
+            cond_eo = f"headphones_setup_eo_{run_num}" if run_num is not None else "headphones_setup_eo_1"
+            ec_psd, eo_psd, fs = compute_session_avg_psd(row, cond_ec, cond_eo)
+            ec_psds.append(ec_psd)
+            eo_psds.append(eo_psd)
+            fs_list.append(fs)
+            if verbose:
+                print(f"✅ Processed {row.ID} ({row.Run}) for '{config_label}'")
+        except Exception as e:
+            warnings.warn(f"Skipping a session due to error: {e}")
+
+    if len(ec_psds) == 0:
+        raise RuntimeError(f"All sessions for config '{config_label}' failed to process.")
+
+    # Establish a common frequency grid (use intersection to be safe)
+    common_freqs = set(ec_psds[0]['Frequency'].round(6).values)
+    for df in ec_psds[1:] + eo_psds:
+        common_freqs &= set(df['Frequency'].round(6).values)
+    common_freqs = np.array(sorted(list(common_freqs)))
+    if common_freqs.size < 10:
+        # Fallback: use first EC grid and interpolate others onto it
+        base_freqs = ec_psds[0]['Frequency'].values
+        def interp_to_base(df):
+            return pd.DataFrame({
+                'Frequency': base_freqs,
+                'Power': np.interp(base_freqs, df['Frequency'].values, df['Power'].values)
+            })
+        ec_stack = [interp_to_base(df) for df in ec_psds]
+        eo_stack = [interp_to_base(df) for df in eo_psds]
+    else:
+        def trim_to_common(df):
+            mask = np.isin(df['Frequency'].round(6).values, common_freqs)
+            return df.loc[mask].sort_values('Frequency').reset_index(drop=True)
+        ec_stack = [trim_to_common(df) for df in ec_psds]
+        eo_stack = [trim_to_common(df) for df in eo_psds]
+
+    # Average across sessions
+    ec_avg = pd.concat(ec_stack).groupby('Frequency', as_index=False)['Power'].mean()
+    eo_avg = pd.concat(eo_stack).groupby('Frequency', as_index=False)['Power'].mean()
+
+    # Compute Berger effect magnitude = alpha-band (8–13 Hz) area difference EC - EO
+    def band_area(psd_df, lo=8.0, hi=13.0):
+        m = (psd_df['Frequency'] >= lo) & (psd_df['Frequency'] <= hi)
+        if m.sum() < 2:  # not enough points for integration
+            return np.nan
+        return float(simpson(psd_df.loc[m, 'Power'].values, x=psd_df.loc[m, 'Frequency'].values))
+
+    alpha_ec = band_area(ec_avg, 8.0, 13.0)
+    alpha_eo = band_area(eo_avg, 8.0, 13.0)
+    alpha_effect = alpha_ec - alpha_eo  # Berger effect: higher alpha in EC than EO
+
+    return {
+        'EC': ec_avg,
+        'EO': eo_avg,
+        'alpha_effect': alpha_effect,
+        'n_used': len(ec_stack),
+        'fs_median': float(np.median(fs_list)) if fs_list else np.nan,
+    }

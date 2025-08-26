@@ -4,3 +4,4 @@ matplotlib
 plotly.express
 neurokit2
 asrpy
+pyprep
