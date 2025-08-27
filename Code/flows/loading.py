@@ -169,3 +169,76 @@ def load_obci_gui_data(exg_file_path, chanlist=None, report=True, cleanFile=True
             print("⚠️ Warning: There are gaps >2 seconds in the timestamps.")
 
     return eeg
+
+    # Extract client side timestamps from dedicated otree log columns
+def get_actionlog_times(logs_df):
+    # Get the timestamps from logging fields
+    timestamps = logs_df.filter(regex='actions').dropna(axis=1, how='all').reset_index(drop=True)
+    # display(timestamps)
+    
+    def extract_times(s):
+        s = s[0].split(';') # Split string
+        s = s[1:] # Remove first, empty entry
+        # print(s)
+
+        # Convert into DataFrame
+        n_messages = int(len(s)/3)
+        messages = []
+        ts = []
+        ts_unix = []
+        for i in range(0, n_messages):
+            step = i*3
+            messages.append(s[step])
+            ts.append(s[step+1])
+            ts_unix.append(s[step+2])
+
+        df = pd.DataFrame({'Message':messages, 
+                           'TS':ts,
+                           'TS_UNIX':ts_unix})
+
+        # Convert unix timestamp to correct datetime
+        df['TS'] = pd.to_datetime(pd.to_numeric(df['TS_UNIX'], errors='coerce'), unit='ms', utc=True).dt.tz_convert('Europe/Berlin')
+        # print(df.Message.unique())
+
+        return df
+
+    # Parse TS cols
+    # TODO: This code could be nicer using a split-apply-combine logic...
+    timestamps_parsed = pd.DataFrame()
+    for phase in timestamps.columns:
+        msgs = extract_times(timestamps[phase])
+        msgs['Exp_Phase'] = phase.replace('xTS', '')
+        timestamps_parsed = pd.concat([timestamps_parsed, msgs], ignore_index=True) # Had to change this as append is deprecated in pandas since 2.0 -> Alternatively: versioning in requirements.txt 
+
+        
+    # Remove unnecessary events
+    timestamps_parsed = timestamps_parsed[timestamps_parsed.Message.str.contains("taskStart|taskEnd")]
+    # display(timestamps_parsed)
+    # display(timestamps_parsed['Exp_Phase'].value_counts())
+    
+    # Restructure DF
+    timestamps_parsed.drop(['TS_UNIX'], axis=1, inplace=True)
+    timestamps_parsed['Message'] = timestamps_parsed['Message'].str.replace('task', '', regex=False) # Remove the substring "task"
+    timestamps_parsed = timestamps_parsed.pivot(index='Exp_Phase', columns='Message', values='TS').reset_index() # Pivot the DataFrame
+    
+    timestamps_parsed[['app_name', 'round_number', 'player', 'page_name']] = timestamps_parsed['Exp_Phase'].str.split('.', expand=True)
+    timestamps_parsed.drop(['Exp_Phase', 'player'], axis=1, inplace=True)
+    timestamps_parsed['token'] = logs_df['participant.token'][0]
+    
+    # Add mapping to three EEG recordings
+    mapping = {
+        "_1": "rec1",
+        "_2": "rec2",
+        "_3": "rec3"
+    }
+
+    timestamps_parsed["rec"] = timestamps_parsed["app_name"].str[-2:].map(mapping)
+    timestamps_parsed["app_name"] = timestamps_parsed["app_name"].str.replace(r"_[123]$", "", regex=True)
+    # display(timestamps_parsed)
+    
+    # Structure IDs
+    timestamps_parsed['page_name'] = timestamps_parsed['page_name'].replace('rest_actions_', '', regex=True)
+    timestamps_parsed['page_name'] = timestamps_parsed['page_name'].replace('_actions', '', regex=True)
+    timestamps_parsed['Exp_Phase'] = timestamps_parsed['app_name'] + "_" + timestamps_parsed['page_name'] + "_" + timestamps_parsed['round_number']
+    
+    return timestamps_parsed

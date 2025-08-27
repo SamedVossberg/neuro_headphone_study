@@ -2,12 +2,15 @@ import pandas as pd
 import numpy as np
 import mne
 import re
-from mne.filter import filter_data
+from mne.filter import filter_data, notch_filter
 from mne.channels import read_custom_montage
 from mne import create_info
 from mne.io import RawArray
+from pyprep.find_noisy_channels import NoisyChannels
+from asrpy import ASR
 from neurokit2 import signal_filter
 import importlib.resources
+import flows
 import warnings
 
 # Pre-process the data
@@ -200,7 +203,7 @@ def preprocess_eeg_mne(
 
 
 
-def preprocess_eeg(eeg_df, return_raw=False):    
+def preprocess_eeg(eeg_df, sfreq: float, return_raw=False, chans=None, notch: float | None = 50.0, l_freq=2, h_freq=50,  average_ref: bool = True):    
     print('--- Pre-processing EEG')
     
     eeg_df = eeg_df.copy() # Make copy to silence warnings
@@ -210,18 +213,24 @@ def preprocess_eeg(eeg_df, return_raw=False):
 
     # Notch-Filter
     # Not needed if focus on <50Hz data anyway
-    # eeg_df = eeg_df.apply(lambda x: notch_filter(np.array(x), Fs=fs, freqs=[50], copy=True, verbose='WARNING'))
+    try:
+        if notch:
+            eeg_df = eeg_df.apply(lambda x: notch_filter(np.array(x), Fs=sfreq, freqs=[50], copy=True, verbose='WARNING'))
+    except Exception as e: 
+        print(f'No notch filtering applied {e}')
     
     # Band-Pass Filter the data
-    eeg_df = eeg_df.apply(lambda x: filter_data(np.array(x), sfreq=fs, l_freq=min_freq, h_freq=max_freq, copy=True, verbose='WARNING'))
-    
+    try:
+        eeg_df = eeg_df.apply(lambda x: filter_data(np.array(x), sfreq=sfreq, l_freq=l_freq, h_freq=h_freq, copy=True, verbose='WARNING'))
+    except Exception as e: 
+        print(f'Band-Pass filter not applied due to {e}')
     # Convert to mne object for some more transformation
-    raw = flows.convert_df_to_raw(eeg_df, fs, chans)
+    raw = flows.convert_df_to_raw(eeg_df, sfreq, chans)
     
     # Detect bad channels using the pyPrep methods for bad channel detection
     try:
         # First stage - remove and interpolate clear outlier channels
-        bad_amp_chs = flows.get_rms_bads(eeg_df[chans], fs, window_width_sec=1, rms_thresh = 50, report=False)
+        bad_amp_chs = flows.get_rms_bads(eeg_df[chans], sfreq, window_width_sec=1, rms_thresh = 50, report=False)
         print("Clearly bad: " + str(bad_amp_chs)) # Report identified bad chans
         if bad_amp_chs:
             raw.info["bads"] = bad_amp_chs
@@ -250,7 +259,7 @@ def preprocess_eeg(eeg_df, return_raw=False):
     # Apply ASR for cleaning sporadic artefacts
     # https://digyt.github.io/asrpy/asrpy/asr.html#asrpy.asr.ASR
     try:
-        asr = ASR(sfreq=fs, cutoff=10, max_bad_chans=0.3)
+        asr = ASR(sfreq=sfreq, cutoff=10, max_bad_chans=0.3)
         asr.fit(raw)
         raw = asr.transform(raw)
     except Exception as e:

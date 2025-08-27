@@ -3,6 +3,7 @@ from .loading import load_obci_gui_data
 from .loading import load_session_setup_data
 from .loading import extract_assr_segment
 from .loading import load_session_impedances
+from .loading import get_actionlog_times
 
 from .plotting import plot_eeg_signals
 from .plotting import plot_eeg_psds
